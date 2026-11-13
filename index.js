@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("./utils/db-connection");
 require('./models');
+const cors = require('cors');
 
 const authRouter = require('./modules/auth/authRouter');
 const organizationRouter = require('./modules/organization/organizationRouter');
@@ -13,6 +14,7 @@ const notificationRouter = require('./modules/notification/notificationRouter');
 const app = express();
 
 app.use(express.json());
+app.use(cors());
 
 app.use('/auth',authRouter);
 app.use('/organizations', organizationRouter);
