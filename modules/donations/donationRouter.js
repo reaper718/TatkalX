@@ -10,6 +10,8 @@ router.get('/', authenticateUser, donationController.getAllDonations);
 router.get('/mine', authenticateUser, donationController.getMyDonations)
 router.get('/:id',authenticateUser, donationController.getDonationById);
 router.patch('/:id', authenticateUser, donationController.updateDonation);
-router.post('/:id/cancel', authenticateUser, donationController.cancelDonation)
+router.post('/:id/cancel', authenticateUser, donationController.cancelDonation);
+router.post('/:id/reservations', authenticateUser, donationController.createReservation);
+router.get('/:id/reservations', authenticateUser, donationController.getDonationReservations);
 
 module.exports = router;

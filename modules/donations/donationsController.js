@@ -7,6 +7,7 @@ const DonationReservation = require('../../models/Donation_reservations');
 const Allocation = require('../../models/allocation');
 const AuditLog = require('../../models/AuditLogs');
 const Notification = require('../../models/Notifications');
+const IdempotencyKey = require('../../models/IdempotencyKey');
 const sequelize = require("../../utils/db-connection");
 
 
@@ -1378,6 +1379,387 @@ const cancelDonation = async (req, res) => {
     }
 };
 
+const createReservation = async (req, res) => {
+    const transaction = await sequelize.transaction();
+    console.log('Authenticated user ID:', req.user.id);
+    try {
+        const donationId = req.params.id;
+        const userId = req.user.id;
+        const quantity = Number(req.body.quantity);
+        const idempotencyKey = req.get('Idempotency-Key');
+
+        if (!idempotencyKey || idempotencyKey.length > 255) {
+            await transaction.rollback();
+
+            return res.status(400).json({
+                success: false,
+                message: 'A valid Idempotency-Key header is required.'
+            });
+        }
+
+        const membership = await OrganizationMember.findOne({
+            where: {
+                user_id: userId
+            },
+            transaction
+        });
+
+        if (!membership) {
+            await transaction.rollback();
+
+            return res.status(403).json({
+                success: false,
+                message: 'You must belong to an active, verified NGO organization to create reservations.'
+            });
+        }
+
+        const ngoOrganization = await Organization.findOne({
+            where: {
+                id: membership.organization_id,
+                type: 'NGO',
+                verification_status: 'VERIFIED',
+                is_active: true
+            },
+            transaction
+        });
+
+        if (!ngoOrganization) {
+            await transaction.rollback();
+
+            return res.status(403).json({
+                success: false,
+                message: 'Your NGO organization must be active and verified.'
+            });
+        }
+
+        const ngoOrganizationId = ngoOrganization.id;
+
+        const donation = await Donation.findByPk(donationId, {
+            transaction,
+            lock: transaction.LOCK.UPDATE
+        });
+
+        if (!donation) {
+            await transaction.rollback();
+
+            return res.status(404).json({
+                success: false,
+                message: 'Donation not found.'
+            });
+        }
+
+        const operation = `CREATE_DONATION_RESERVATION:${donationId}`;
+
+        const existingRequest = await IdempotencyKey.findOne({
+            where: {
+                user_id: userId,
+                operation,
+                key: idempotencyKey
+            },
+            transaction
+        });
+
+        if (existingRequest) {
+            await transaction.commit();
+
+            return res
+                .status(existingRequest.response_status)
+                .json(existingRequest.response_body);
+        }
+
+        if (donation.status !== 'PUBLISHED') {
+            await transaction.rollback();
+
+            return res.status(400).json({
+                success: false,
+                message: 'Only published donations can be reserved.'
+            });
+        }
+
+        const now = new Date();
+
+        if (new Date(donation.pickup_deadline) <= now) {
+            await transaction.rollback();
+
+            return res.status(400).json({
+                success: false,
+                message: 'The pickup deadline for this donation has passed.'
+            });
+        }
+
+        const totalQuantity = Number(donation.total_quantity);
+        const reservedQuantity = Number(donation.reserved_quantity || 0);
+        const allocatedQuantity = Number(donation.allocated_quantity || 0);
+
+        const availableQuantity =
+            totalQuantity - reservedQuantity - allocatedQuantity;
+
+        if (quantity > availableQuantity) {
+            await transaction.rollback();
+
+            return res.status(409).json({
+                success: false,
+                message: 'Requested quantity is not available.',
+                availableQuantity
+            });
+        }
+
+        const reservationTTLMinutes =
+            Number(process.env.RESERVATION_TTL_MINUTES) || 15;
+
+        const ttlExpiry = new Date(
+            now.getTime() + reservationTTLMinutes * 60 * 1000
+        );
+
+        const pickupDeadline = new Date(donation.pickup_deadline);
+
+        const expiresAt = new Date(
+            Math.min(ttlExpiry.getTime(), pickupDeadline.getTime())
+        );
+
+        const newReservedQuantity = reservedQuantity + quantity;
+
+        await donation.update(
+            {
+                reserved_quantity: newReservedQuantity
+            },
+            { transaction }
+        );
+
+        const reservation = await DonationReservation.create(
+            {
+                donation_id: donation.id,
+                ngo_organization_id: ngoOrganizationId,
+                quantity,
+                status: 'PENDING',
+                expires_at: expiresAt
+            },
+            { transaction }
+        );
+
+        const donorMembers = await OrganizationMember.findAll({
+            where: {
+                organization_id: donation.donor_organization_id
+            },
+            attributes: ['user_id'],
+            transaction
+        });
+
+        const donorUserIds = [
+            ...new Set(donorMembers.map(member => member.user_id))
+        ];
+
+        if (donorUserIds.length > 0) {
+            await Notification.bulkCreate(
+                donorUserIds.map(donorUserId => ({
+                    user_id: donorUserId,
+                    type: 'RESERVATION_CREATED',
+                    title: 'New donation reservation',
+                    message: `${ngoOrganization.name} has requested ${quantity} ${donation.unit} of "${donation.title}".`,
+                    reference_type: 'DONATION_RESERVATION',
+                    reference_id: reservation.id,
+                    is_read: false
+                })),
+                { transaction }
+            );
+        }
+
+        const responseBody = {
+            success: true,
+            message: 'Donation reservation created successfully.',
+            data: {
+                reservationId: reservation.id,
+                donationId: donation.id,
+                donationTitle: donation.title,
+                ngoOrganizationId,
+                quantity: Number(reservation.quantity),
+                status: reservation.status,
+                expiresAt: reservation.expires_at,
+                availableQuantity:
+                    totalQuantity - newReservedQuantity - allocatedQuantity
+            }
+        };
+
+        await IdempotencyKey.create(
+            {
+                key: idempotencyKey,
+                user_id: userId,
+                operation,
+                response_status: 201,
+                response_body: responseBody
+            },
+            { transaction }
+        );
+
+        await transaction.commit();
+
+        return res.status(201).json(responseBody);
+
+    } catch (error) {
+        if (!transaction.finished) {
+            await transaction.rollback();
+        }
+
+        console.error('Create reservation error:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to create donation reservation.',
+            error: error.message
+        });
+    }
+};
+
+
+const getDonationReservations = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const donationId = req.params.id;
+
+        const page = Math.max(
+            Number.parseInt(req.query.page, 10) || 1,
+            1
+        );
+
+        const limit = Math.min(
+            Math.max(Number.parseInt(req.query.limit, 10) || 20, 1),
+            50
+        );
+
+        const offset = (page - 1) * limit;
+
+        const allowedStatuses = [
+            'PENDING',
+            'CONFIRMED',
+            'REJECTED',
+            'CANCELLED',
+            'EXPIRED'
+        ];
+
+        const status = req.query.status
+            ? req.query.status.toUpperCase()
+            : null;
+
+        if (status && !allowedStatuses.includes(status)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid reservation status.',
+                allowedStatuses
+            });
+        }
+
+        const donation = await Donation.findByPk(donationId);
+
+        if (!donation) {
+            return res.status(404).json({
+                success: false,
+                message: 'Donation not found.'
+            });
+        }
+
+        const membership = await OrganizationMember.findOne({
+            where: {
+                user_id: userId,
+                organization_id: donation.donor_organization_id,
+                role: {
+                    [Op.in]: ['OWNER', 'MANAGER']
+                }
+            }
+        });
+
+        if (!membership) {
+            return res.status(403).json({
+                success: false,
+                message: 'You are not authorized to view reservations for this donation.'
+            });
+        }
+
+        const whereCondition = {
+            donation_id: donation.id
+        };
+
+        if (status) {
+            whereCondition.status = status;
+        }
+
+        const { count, rows } =
+            await DonationReservation.findAndCountAll({
+                where: whereCondition,
+
+                attributes: [
+                    'id',
+                    'donation_id',
+                    'ngo_organization_id',
+                    'quantity',
+                    'status',
+                    'expires_at',
+                    'createdAt'
+                ],
+
+                include: [{
+                    model: Organization,
+                    as: 'ngoOrganization',
+                    required: true,
+                    attributes: [
+                        'id',
+                        'name',
+                        'type',
+                        'description',
+                        'email',
+                        'phone',
+                        'address',
+                        'city'
+                    ]
+                }],
+
+                order: [['createdAt', 'DESC']],
+                limit,
+                offset,
+                distinct: true
+            });
+
+        return res.status(200).json({
+            success: true,
+            message: 'Donation reservations fetched successfully.',
+
+            donation: {
+                id: donation.id,
+                title: donation.title,
+                donorOrganizationId: donation.donor_organization_id
+            },
+
+            pagination: {
+                totalItems: count,
+                currentPage: page,
+                totalPages: Math.ceil(count / limit),
+                limit,
+                hasNextPage: page < Math.ceil(count / limit),
+                hasPreviousPage: page > 1
+            },
+
+            data: rows.map(reservation => ({
+                reservationId: reservation.id,
+                donationId: reservation.donation_id,
+                quantity: Number(reservation.quantity),
+                status: reservation.status,
+                expiresAt: reservation.expires_at,
+                createdAt: reservation.createdAt,
+
+                ngo: reservation.ngoOrganization
+            }))
+        });
+
+    } catch (error) {
+        console.error('Get donation reservations error:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to fetch donation reservations.',
+            error: error.message
+        });
+    }
+};
+
 
 module.exports = {
   createDonation,
@@ -1386,5 +1768,7 @@ module.exports = {
   getDonationById,
   getMyDonations,
   updateDonation,
-  cancelDonation
+  cancelDonation,
+  createReservation,
+  getDonationReservations
 };
