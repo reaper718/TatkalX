@@ -2,6 +2,7 @@ const express = require("express");
 const db = require("./utils/db-connection");
 require('./models');
 const cors = require('cors');
+const path = require('path');
 
 const authRouter = require('./modules/auth/authRouter');
 const organizationRouter = require('./modules/organization/organizationRouter');
@@ -15,6 +16,12 @@ const app = express();
 
 app.use(express.json());
 app.use(cors());
+
+app.get("/", (req,res) => {
+    res.sendFile(path.join(__dirname, "./public/login.html"))
+})
+
+app.use(express.static(path.join(__dirname, "./public")));
 
 app.use('/auth',authRouter);
 app.use('/organizations', organizationRouter);

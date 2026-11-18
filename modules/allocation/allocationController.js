@@ -520,23 +520,6 @@ const updateAllocationStatus = async (req, res) => {
             });
         }
 
-        if (notes.length > 1000) {
-            await transaction.rollback();
-
-            return res.status(400).json({
-                success: false,
-                message: 'Notes cannot exceed 1000 characters.'
-            });
-        }
-
-        if (requestedStatus === 'FAILED' && !notes) {
-            await transaction.rollback();
-
-            return res.status(400).json({
-                success: false,
-                message: 'Please provide a reason when reporting an allocation failure.'
-            });
-        }
 
         const initialAllocation = await Allocation.findByPk(
             allocationId,
@@ -663,12 +646,12 @@ const updateAllocationStatus = async (req, res) => {
                 });
             }
 
-            if (!isNgoMember) {
+            if (!isDonorMember) {
                 await transaction.rollback();
 
                 return res.status(403).json({
                     success: false,
-                    message: 'Only the recipient NGO can confirm pickup.'
+                    message: 'Only the recipient donor can confirm pickup.'
                 });
             }
 
