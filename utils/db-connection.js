@@ -4,7 +4,7 @@ const sequelize = new Sequelize('foodloop', 'postgres', 'root', {
     host: 'localhost',
     dialect: 'postgres',
     port: 5432,
-    // logging: false
+    logging: false
 });
 
 (async () => {
