@@ -1,3 +1,5 @@
+let currentOrganization = null;
+
 document.addEventListener("DOMContentLoaded", async () => {
   const token = FoodLoopUtils.getToken();
   let user = FoodLoopUtils.getUser();
@@ -29,6 +31,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     [];
   const membership = memberships[0] || {};
   const org = membership.organization || membership.Organisation || {};
+  currentOrganization = org;
   const orgType = String(
     org.type || membership.organizationType || user?.organizationType || "",
   ).toUpperCase();
@@ -128,8 +131,10 @@ async function renderView(role, view) {
   }
 }
 
+
 async function renderOverview(role, el) {
   let primary = [];
+
   try {
     if (role === "DONOR")
       primary = asArray(await FoodLoopAPI.get("/donations/mine"));
@@ -138,22 +143,165 @@ async function renderOverview(role, el) {
     else
       primary = asArray(await FoodLoopAPI.get("/admin/organizations/pending"));
   } catch {}
+
   const label =
     role === "DONOR"
       ? "Your donations"
       : role === "NGO"
         ? "Your reservations"
         : "Pending organizations";
+
   el.innerHTML = `
     <div class="row g-3 mb-4">
-      <div class="col-md-4"><div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value">${primary.length}</div></div></div>
-      <div class="col-md-4"><div class="stat-card"><div class="stat-label">Workspace</div><div class="stat-value fs-4">${role}</div></div></div>
-      <div class="col-md-4"><div class="stat-card"><div class="stat-label">Pilot location</div><div class="stat-value fs-4">Indore</div></div></div>
+      <div class="col-md-4">
+        <div class="stat-card">
+          <div class="stat-label">${label}</div>
+          <div class="stat-value">${primary.length}</div>
+        </div>
+      </div>
+
+      <div class="col-md-4">
+        <div class="stat-card">
+          <div class="stat-label">Workspace</div>
+          <div class="stat-value fs-4">${role}</div>
+        </div>
+      </div>
+
+      <div class="col-md-4">
+        <div class="stat-card">
+          <div class="stat-label">Organization location</div>
+          <div class="stat-value fs-4">
+            ${esc(
+              role === "ADMIN"
+                ? "All locations"
+                : currentOrganization?.city || "Not specified"
+            )}
+          </div>
+        </div>
+      </div>
     </div>
-    <div class="panel"><div class="panel-title">Getting started</div>
-      <p class="muted mb-2">${role === "DONOR" ? "Publish a donation, then review incoming NGO reservations." : role === "NGO" ? "Find nearby surplus food, request a quantity, and track approved allocations." : "Review pending organizations before they participate in FoodLoop."}</p>
-      <p class="small muted mb-0">The counts above are live API results where the corresponding endpoint is available.</p>
-    </div>`;
+
+    <div class="panel mt-4">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="panel-title mb-0">Notifications</div>
+        <button class="btn btn-sm btn-outline-primary" id="markAllReadBtn">
+          Mark all as read
+        </button>
+      </div>
+
+      <div id="notificationsContainer">
+        <div class="text-muted small">Loading notifications...</div>
+      </div>
+    </div>
+  `;
+
+  // Load notifications after rendering the overview
+  await renderNotifications(el);
+
+  // Mark all notifications as read
+  el.querySelector("#markAllReadBtn").addEventListener("click", async () => {
+    try {
+      await FoodLoopAPI.patch("/notifications/read-all", {});
+
+      await renderNotifications(el);
+
+      FoodLoopUtils.showAlert(
+        "All notifications marked as read.",
+        "success"
+      );
+    } catch (error) {
+      FoodLoopUtils.showAlert(
+        error.response?.data?.message || error.message
+      );
+    }
+  });
+}
+
+
+async function renderNotifications(el) {
+    const container = el.querySelector("#notificationsContainer");
+
+    try {
+        const notifications = asArray(
+            await FoodLoopAPI.get("/notifications")
+        );
+
+        const unreadCount = notifications.filter(
+            n => !(n.is_read ?? n.isRead)
+        ).length;
+
+        if (!notifications.length) {
+            container.innerHTML = empty(
+                "No notifications",
+                "You're all caught up!"
+            );
+            el.querySelector("#markAllReadBtn").disabled = true;
+            return;
+        }
+
+        container.innerHTML = `
+            <div class="small text-muted mb-3">
+                ${unreadCount} unread notification(s)
+            </div>
+
+            <div class="list-group list-group-flush">
+                ${notifications.map(n => {
+                    const isRead = n.is_read ?? n.isRead;
+
+                    return `
+                        <div class="list-group-item px-0 ${!isRead ? "bg-light" : ""}">
+                            <div class="d-flex justify-content-between gap-3">
+                                <div>
+                                    <strong>${esc(n.title || "Notification")}</strong>
+                                    <p class="mb-1 small">${esc(n.message || "")}</p>
+                                    <small class="text-muted">
+                                        ${FoodLoopUtils.formatDate(
+                                            n.created_at || n.createdAt
+                                        )}
+                                    </small>
+                                </div>
+
+                                ${
+                                    !isRead
+                                        ? `<button class="btn btn-sm btn-outline-primary mark-read-btn"
+                                            data-id="${esc(n.id || n.notificationId)}">
+                                            Mark read
+                                           </button>`
+                                        : `<span class="notification-read-badge">Read</span>`
+                                }
+                            </div>
+                        </div>
+                    `;
+                }).join("")}
+            </div>
+        `;
+
+        el.querySelector("#markAllReadBtn").disabled = unreadCount === 0;
+
+        container.querySelectorAll(".mark-read-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                try {
+                    await FoodLoopAPI.patch(
+                        `/notifications/${btn.dataset.id}/read`,
+                        {}
+                    );
+
+                    await renderNotifications(el);
+                } catch (error) {
+                    FoodLoopUtils.showAlert(
+                        error.response?.data?.message || error.message
+                    );
+                }
+            });
+        });
+
+    } catch (error) {
+        container.innerHTML = `
+            <div class="alert alert-danger">
+                ${esc(error.response?.data?.message || error.message)}
+            </div>
+        `;
+    }
 }
 
 function detectPickupLocation() {
