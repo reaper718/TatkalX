@@ -1,3 +1,4 @@
+require('dotenv').config();
 const Users = require('../../models/Users');
 const Organizations = require('../../models/Organizations');
 const OrganizationMembers = require('../../models/Organozation_members');
@@ -121,7 +122,7 @@ const login = async (req,res) => {
             })
         }
 
-        const token = jwt.sign({id: user.id}, 'secretKey', {expiresIn: '24h'});
+        const token = jwt.sign({id: user.id}, process.env.JWT_KEY, {expiresIn: '2h'});
 
         return res.status(200).json({
             success: true,
