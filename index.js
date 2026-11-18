@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require("express");
 const db = require("./utils/db-connection");
 require('./models');
@@ -32,12 +33,15 @@ app.use('/reservations', reservationRouter);
 app.use('/allocations', allocationRouter);
 app.use('/notifications', notificationRouter);
 
+const PORT = process.env.PORT || 3000;
+
 db.sync()
   .then(() => {
-    app.listen(3000, () => {
-      console.log("Server is running on http://localhost:3000");
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server is running on port ${PORT}`);
     });
   })
   .catch((error) => {
-    console.log(error);
+    console.error("Database synchronization failed:", error);
+    process.exit(1);
   });
