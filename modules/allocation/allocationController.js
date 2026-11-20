@@ -655,7 +655,7 @@ const updateAllocationStatus = async (req, res) => {
                 });
             }
 
-            actorOrganizationId = ngoOrganizationId;
+            actorOrganizationId = donorOrganizationId;
         }
 
         if (requestedStatus === 'DELIVERED') {
@@ -747,38 +747,54 @@ const updateAllocationStatus = async (req, res) => {
             { transaction }
         );
 
-        const recipientOrganizationId =
-            actorOrganizationId === ngoOrganizationId
-                ? donorOrganizationId
-                : ngoOrganizationId;
-
-        const recipientOrganization = await Organization.findByPk(
-            recipientOrganizationId,
-            {
-                attributes: ['id', 'name'],
-                transaction
-            }
-        );
-
-        const recipientMembers = await OrganizationMember.findAll({
+        // Fetch both donor and NGO organization members
+        const donorMembers = await OrganizationMember.findAll({
             where: {
-                organization_id: recipientOrganizationId
+                organization_id: donorOrganizationId
             },
             attributes: ['user_id'],
             transaction
         });
 
+        const ngoMembers = await OrganizationMember.findAll({
+            where: {
+                organization_id: ngoOrganizationId
+            },
+            attributes: ['user_id'],
+            transaction
+        });
+
+        // Combine members from both organizations
         const recipientUserIds = [
-            ...new Set(
-                recipientMembers.map(member => member.user_id)
-            )
+            ...new Set([
+                ...donorMembers.map(member => member.user_id),
+                ...ngoMembers.map(member => member.user_id)
+            ])
         ];
 
-        if (recipientUserIds.length > 0) {
-            const notificationMessage = requestedStatus === 'FAILED'
-                ? `${actorOrganization.name} reported a failure for "${donation.title}". Reason: ${notes}`
-                : `${actorOrganization.name} updated the allocation for "${donation.title}" to ${requestedStatus}.`;
+        // Identify who performed the status update
+        const actorRole = actorOrganizationId === donorOrganizationId
+            ? 'Donor'
+            : 'NGO';
 
+        // Generate the appropriate notification message
+        let notificationMessage;
+
+        if (requestedStatus === 'PICKED_UP') {
+            notificationMessage =
+                `${actorOrganization.name} (Donor) confirmed that the food order "${donation.title}" has been picked up.`;
+        }
+        else if (requestedStatus === 'DELIVERED') {
+            notificationMessage =
+                `${actorOrganization.name} (NGO) confirmed that the food order "${donation.title}" has been delivered.`;
+        }
+        else if (requestedStatus === 'FAILED') {
+            notificationMessage =
+                `${actorOrganization.name} (${actorRole}) reported a failure for "${donation.title}". Reason: ${notes || 'No reason provided'}`;
+        }
+
+        // Push notification to both organizations
+        if (recipientUserIds.length > 0) {
             await Notification.bulkCreate(
                 recipientUserIds.map(recipientUserId => ({
                     user_id: recipientUserId,
